@@ -139,8 +139,3 @@ void parse_eas_data(struct eas_info *info)
 		info->available = false;
 	}
 }
-
-struct trans_sched_interface g_trans_sched_interface;
-EXPORT_SYMBOL(g_trans_sched_interface);
-static_assert(sizeof(g_trans_sched_interface) == 0x110,
-	      "trans_sched_interface ABI mismatch");

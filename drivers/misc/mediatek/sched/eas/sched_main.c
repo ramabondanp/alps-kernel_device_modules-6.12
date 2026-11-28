@@ -1463,6 +1463,15 @@ static void __exit mtk_scheduler_exit(void)
 	free_cpu_array();
 }
 
+/*
+ * Define g_trans_sched_interface in scheduler.ko rather than common.c because
+ * common.c is compiled into both cpufreq_sugov_ext.ko and scheduler.ko.
+ */
+struct trans_sched_interface g_trans_sched_interface;
+EXPORT_SYMBOL(g_trans_sched_interface);
+static_assert(sizeof(g_trans_sched_interface) == 0x110,
+	      "trans_sched_interface ABI mismatch");
+
 #if IS_BUILTIN(CONFIG_MTK_CPUFREQ_SUGOV_EXT)
 late_initcall(mtk_scheduler_init);
 #else
