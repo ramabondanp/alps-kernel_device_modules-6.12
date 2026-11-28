@@ -144,6 +144,11 @@ int tran_led_dev_show_tran_multicolor(struct tran_led_device *dev, char *buf)
 }
 EXPORT_SYMBOL(tran_led_dev_show_tran_multicolor);
 
+static void tran_led_device_release(struct device *dev)
+{
+	kfree(to_tran_led_device(dev));
+}
+
 /*
  * register/unregister.
  *
@@ -174,6 +179,7 @@ struct tran_led_device *tran_led_device_register(const char *name,
 	 */
 	led_dev->dev.parent = parent;
 	led_dev->dev.class = tlc_led_class;
+	led_dev->dev.release = tran_led_device_release;
 	dev_set_name(&led_dev->dev, "%s", name);
 	dev_set_drvdata(&led_dev->dev, devdata);
 
@@ -187,7 +193,7 @@ struct tran_led_device *tran_led_device_register(const char *name,
 
 	rc = device_register(&led_dev->dev);
 	if (rc) {
-		kfree(led_dev);
+		put_device(&led_dev->dev);
 		return ERR_PTR(rc);
 	}
 
@@ -203,11 +209,11 @@ void tran_led_device_unregister(struct tran_led_device *led_dev)
 	if (!led_dev)
 		return;
 
-	led_dev->ops = NULL;
-	device_unregister(&led_dev->dev);
-
 	if (ptlc_led == led_dev)
 		ptlc_led = NULL;
+
+	led_dev->ops = NULL;
+	device_unregister(&led_dev->dev);
 }
 EXPORT_SYMBOL(tran_led_device_unregister);
 
