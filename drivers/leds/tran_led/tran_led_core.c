@@ -55,13 +55,22 @@
 #define TLC_DEV_NUM		2
 #define TLC_LOG_LEVEL_DEFAULT	TLC_DEBUG_LEVEL
 
-/* ioctl commands, recovered as literal immediates from the switch */
-#define TRAN_GET_CHIP_TYPE	_IOWR('L', 0x02, int)
-#define TRAN_SET_I2C_TIMEOUT	_IOW('L', 0x03, int)
-#define TRAN_RW_I2C_DATA	_IOW('L', 0x04, unsigned long)
-#define TRAN_SET_I2C_RETRIES	_IOW('L', 0x05, int)
-#define TRAN_GET_CMD		_IOR('L', 0x00, char[TLC_CMD_MAX_SIZE])
-#define TRAN_SET_CMD		_IOW('L', 0x07, char[TLC_CMD_MAX_SIZE])
+/*
+ * ioctl commands, recovered as literal immediates from the firmware switch.
+ * The type byte is 0x12, not 'L':
+ *   0x80011200 get_chip_type   0x80201201 get_cmd
+ *   0x40201202 set_cmd         0x40041203 rw_i2c_data
+ *   0x40041204 set_i2c_retries 0x40041205 set_i2c_timeout
+ */
+#define TRAN_LED_IOC_MAGIC	0x12
+#define TRAN_GET_CHIP_TYPE	_IOR(TRAN_LED_IOC_MAGIC, 0x00, char)
+#define TRAN_GET_CMD		_IOR(TRAN_LED_IOC_MAGIC, 0x01, \
+				     char[TLC_CMD_MAX_SIZE])
+#define TRAN_SET_CMD		_IOW(TRAN_LED_IOC_MAGIC, 0x02, \
+				     char[TLC_CMD_MAX_SIZE])
+#define TRAN_RW_I2C_DATA	_IOW(TRAN_LED_IOC_MAGIC, 0x03, int)
+#define TRAN_SET_I2C_RETRIES	_IOW(TRAN_LED_IOC_MAGIC, 0x04, int)
+#define TRAN_SET_I2C_TIMEOUT	_IOW(TRAN_LED_IOC_MAGIC, 0x05, int)
 
 /*
  * Offsets are load-bearing: the firmware's probe and ioctl use them directly
@@ -143,6 +152,11 @@ static ssize_t show_tran_led_cmd(struct device *dev,
 {
 	struct tran_led_core *tlc = dev_get_drvdata(dev);
 	char pbuf = 0;
+	int ret;
+
+	ret = tran_led_dev_check(tlc);
+	if (ret < 0)
+		return ret;
 
 	tran_led_dev_show_tran_led_cmd(tlc->primary_led, &pbuf);
 
@@ -174,6 +188,11 @@ static ssize_t show_tran_led_check(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
 	struct tran_led_core *tlc = dev_get_drvdata(dev);
+	int ret;
+
+	ret = tran_led_dev_check(tlc);
+	if (ret < 0)
+		return ret;
 
 	return tran_led_dev_show_tran_led_check(tlc->primary_led, buf);
 }
@@ -183,9 +202,14 @@ static ssize_t store_tran_led_check(struct device *dev,
 				    const char *buf, size_t size)
 {
 	struct tran_led_core *tlc = dev_get_drvdata(dev);
+	int ret;
 
 	if (!size)
 		return 0;
+
+	ret = tran_led_dev_check(tlc);
+	if (ret < 0)
+		return ret;
 
 	tran_led_dev_store_tran_led_check(tlc->primary_led, buf);
 
@@ -199,6 +223,11 @@ static ssize_t show_tran_pdlc_cmd(struct device *dev,
 {
 	struct tran_led_core *tlc = dev_get_drvdata(dev);
 	char pbuf = 0;
+	int ret;
+
+	ret = tran_led_dev_check(tlc);
+	if (ret < 0)
+		return ret;
 
 	tran_led_dev_show_tran_led_cmd(tlc->second_led, &pbuf);
 
@@ -210,9 +239,14 @@ static ssize_t store_tran_pdlc_cmd(struct device *dev,
 				   const char *buf, size_t size)
 {
 	struct tran_led_core *tlc = dev_get_drvdata(dev);
+	int ret;
 
 	if (!size)
 		return 0;
+
+	ret = tran_led_dev_check(tlc);
+	if (ret < 0)
+		return ret;
 
 	tran_led_dev_store_tran_led_cmd(tlc->second_led, buf);
 
@@ -231,13 +265,23 @@ static ssize_t show_tran_multicolor(struct device *dev,
 {
 	struct tran_led_core *tlc = dev_get_drvdata(dev);
 	size_t len = 0;
+	int ret;
 
-	if (tlc->primary_led)
-		len = tran_led_dev_show_tran_multicolor(tlc->primary_led, buf);
+	ret = tran_led_dev_check(tlc);
+	if (ret < 0)
+		return ret;
+
+	if (tlc->primary_led) {
+		ret = tran_led_dev_show_tran_multicolor(tlc->primary_led, buf);
+		if (ret > 0)
+			len = ret;
+	}
 
 	if (tlc->second_led) {
-		tran_led_dev_show_tran_multicolor(tlc->second_led, buf + len);
-		len = strlen(buf);
+		ret = tran_led_dev_show_tran_multicolor(tlc->second_led,
+							buf + len);
+		if (ret > 0)
+			len += ret;
 	}
 
 	if (!len)
@@ -255,6 +299,10 @@ static ssize_t store_tran_multicolor(struct device *dev,
 
 	if (!size)
 		return 0;
+
+	ret = tran_led_dev_check(tlc);
+	if (ret < 0)
+		return ret;
 
 	if (!tlc->primary_led && !tlc->second_led)
 		return -ENODEV;
@@ -356,7 +404,7 @@ static int tran_led_release(struct inode *inode, struct file *file)
 static long tran_led_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct tran_led_core *tlc = file->private_data;
-	char kbuf[TLC_CMD_MAX_SIZE];
+	char kbuf[TLC_CMD_MAX_SIZE] = { 0 };
 	int ret = 0, val = 0;
 	void __user *uarg = (void __user *)arg;
 
@@ -461,7 +509,8 @@ static const struct file_operations tran_buff_fops = {
 static int tran_led_core_probe(struct platform_device *pdev)
 {
 	struct tran_led_core *tlc;
-	struct kobject *kobj;
+	struct kobject *led_kobj = NULL, *pdlc_kobj = NULL;
+	struct device *cdev_dev;
 	int ret;
 
 	tlc_info("%s: starts\n", __func__);
@@ -482,40 +531,43 @@ static int tran_led_core_probe(struct platform_device *pdev)
 	ret = sysfs_create_group(&pdev->dev.kobj, &tran_led_group);
 	if (ret < 0) {
 		tlc_err("%s : sysfs_create_group failed ret=%d\n", __func__, ret);
-		return 0;
+		goto err_ptlc;
 	}
 
-	kobj = kobject_create_and_add("led", NULL);
-	if (!kobj) {
+	led_kobj = kobject_create_and_add("led", NULL);
+	if (!led_kobj) {
 		tlc_err("%s:sysfs_create_group fail\n", __func__);
-		return 0;
+		ret = -ENOMEM;
+		goto err_group;
 	}
 
-	ret = sysfs_create_link(kobj, &pdev->dev.kobj, "led");
+	ret = sysfs_create_link(led_kobj, &pdev->dev.kobj, "led");
 	if (ret < 0) {
 		tlc_err("%s : sysfs_create_link failed ret=%d\n", __func__, ret);
-		return 0;
+		goto err_led_kobj;
 	}
 
 	if (tlc->support_pdlc) {
-		kobj = kobject_create_and_add("pdlc", NULL);
-		if (!kobj) {
+		pdlc_kobj = kobject_create_and_add("pdlc", NULL);
+		if (!pdlc_kobj) {
 			tlc_err("%s:sysfs_create_group fail\n", __func__);
-			return 0;
+			ret = -ENOMEM;
+			goto err_led_link;
 		}
 
-		ret = sysfs_create_link(kobj, &pdev->dev.kobj, "pdlc");
+		ret = sysfs_create_link(pdlc_kobj, &pdev->dev.kobj, "pdlc");
 		if (ret < 0) {
 			tlc_err("%s : sysfs_create_link failed ret=%d\n",
 				__func__, ret);
-			return 0;
+			goto err_pdlc_kobj;
 		}
 	}
 
 	led_buff = kmalloc(TLC_CMD_BUFFER_SIZE, GFP_KERNEL);
 	if (!led_buff) {
 		tlc_err("%s: malloc fail!\n", __func__);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_pdlc_link;
 	}
 	memset(led_buff, 0, TLC_CMD_BUFFER_SIZE);
 
@@ -549,14 +601,18 @@ static int tran_led_core_probe(struct platform_device *pdev)
 		goto err_buff_cdev;
 	}
 
-	if (IS_ERR(device_create(tlc->class, NULL, tlc->devno, NULL,
-				 TLC_DEVICE_NAME))) {
+	cdev_dev = device_create(tlc->class, NULL, tlc->devno, NULL,
+				 TLC_DEVICE_NAME);
+	if (IS_ERR(cdev_dev)) {
+		ret = PTR_ERR(cdev_dev);
 		tlc_err("Failed to create device\n");
 		goto err_class;
 	}
 
-	if (IS_ERR(device_create(tlc->class, NULL, tlc->devno + 1, NULL,
-				 "tran_led_buff"))) {
+	cdev_dev = device_create(tlc->class, NULL, tlc->devno + 1, NULL,
+				 "tran_led_buff");
+	if (IS_ERR(cdev_dev)) {
+		ret = PTR_ERR(cdev_dev);
 		tlc_err("Failed to create device\n");
 		goto err_device;
 	}
@@ -578,6 +634,20 @@ err_region:
 err_buff:
 	kfree(led_buff);
 	led_buff = NULL;
+err_pdlc_link:
+	if (pdlc_kobj)
+		sysfs_remove_link(pdlc_kobj, "pdlc");
+err_pdlc_kobj:
+	if (pdlc_kobj)
+		kobject_put(pdlc_kobj);
+err_led_link:
+	sysfs_remove_link(led_kobj, "led");
+err_led_kobj:
+	kobject_put(led_kobj);
+err_group:
+	sysfs_remove_group(&pdev->dev.kobj, &tran_led_group);
+err_ptlc:
+	ptlc = NULL;
 
 	return ret;
 }
