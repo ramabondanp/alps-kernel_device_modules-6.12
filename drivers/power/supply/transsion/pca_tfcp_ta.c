@@ -45,7 +45,10 @@
 
 #define PCA_TFCP_TA_NAME	"tfcp_ta"
 #define PCA_TFCP_ADAPTER_NAME	"tfcp_adapter"
-#define PCA_TFCP_DEFAULT_MV	5000000
+#define PCA_TFCP_ENABLE_MV	5500
+#define PCA_TFCP_ENABLE_MA	2200
+#define PCA_TFCP_HARDRESET_MV	5300
+#define PCA_TFCP_HARDRESET_MA	3000
 
 struct pca_tfcp_info {
 	struct device *dev;
@@ -194,7 +197,8 @@ static int pca_tfcp_authenticate_ta(struct tadapter_device *dev,
 	return 0;
 }
 
-static int __maybe_unused pca_tfcp_enable_charging(struct tadapter_device *dev, bool en)
+static int __maybe_unused pca_tfcp_enable_charging(struct tadapter_device *dev,
+						   bool en)
 {
 	struct pca_tfcp_info *info = tadapter_dev_get_drvdata(dev);
 	struct tc_ta_classdev *ta = pca_tfcp_get_ta(info);
@@ -202,9 +206,9 @@ static int __maybe_unused pca_tfcp_enable_charging(struct tadapter_device *dev, 
 	if (!ta)
 		return -ENODEV;
 
-	/* enable_charging drives the output directly, not the control byte */
-	return tc_ta_device_set_voltage_current(ta,
-						en ? PCA_TFCP_DEFAULT_MV : 0, 0);
+	/* The firmware always programs 5.5 V / 2.2 A here and ignores @en. */
+	return tc_ta_device_set_voltage_current(ta, PCA_TFCP_ENABLE_MV,
+						PCA_TFCP_ENABLE_MA);
 }
 
 static int __maybe_unused pca_tfcp_inform_related_module(struct tadapter_device *dev)
@@ -223,15 +227,11 @@ static int __maybe_unused pca_tfcp_inform_related_module(struct tadapter_device 
 
 static int __maybe_unused pca_tfcp_exit_rfc_mode(struct tadapter_device *dev)
 {
-	struct pca_tfcp_info *info = tadapter_dev_get_drvdata(dev);
-	struct tc_ta_classdev *ta = pca_tfcp_get_ta(info);
+	union com_propval val = { 0 };
 
-	if (!ta)
-		return -ENODEV;
-
-	/* RFC mode is released by dropping the output control */
-	/* exit_rfc_mode releases RFC by dropping the TA output */
-	return tc_ta_device_set_voltage_current(ta, PCA_TFCP_DEFAULT_MV, 0);
+	/* The firmware releases RFC by asking usb_control to turn the TA off */
+	return tran_dev_set_prop(tran_get_by_name("usb_control"),
+				 TRAN_PROP_USB_CTRL_TA_OFF, &val);
 }
 
 static int pca_tfcp_is_cc(struct tadapter_device *dev, bool *cc)
@@ -288,7 +288,8 @@ static int pca_tfcp_send_hardreset(struct tadapter_device *dev)
 	if (ret < 0)
 		return ret;
 
-	ret = tc_ta_device_set_voltage_current(ta, PCA_TFCP_DEFAULT_MV, 0);
+	ret = tc_ta_device_set_voltage_current(ta, PCA_TFCP_HARDRESET_MV,
+					       PCA_TFCP_HARDRESET_MA);
 	if (ret < 0)
 		return ret;
 
@@ -313,14 +314,15 @@ static int pca_tfcp_get_ta_fw(struct tadapter_device *dev, u8 *code,
 static int pca_tfcp_plug_out_reset(struct tadapter_device *dev)
 {
 	struct pca_tfcp_info *info = tadapter_dev_get_drvdata(dev);
-	struct tc_ta_classdev *ta = pca_tfcp_get_ta(info);
-
-	if (!ta)
-		return -ENODEV;
+	union com_propval val = { 0 };
 
 	info->det_done = false;
 
-	return tc_ta_device_set_voltage_current(ta, PCA_TFCP_DEFAULT_MV, 0);
+	/* The firmware turns the TA off through usb_control and returns 0 */
+	tran_dev_set_prop(tran_get_by_name("usb_control"),
+			  TRAN_PROP_USB_CTRL_TA_OFF, &val);
+
+	return 0;
 }
 
 static int pca_tfcp_get_det_done(struct tadapter_device *dev, bool *det_done)
@@ -474,7 +476,7 @@ static int pca_tfcp_parse_dt(struct pca_tfcp_info *info, struct device *dev)
 	info->ta_dev = tc_ta_device_get_by_name(name);
 	if (IS_ERR_OR_NULL(info->ta_dev)) {
 		dev_err(dev, "get ta dev %s fail\n", name);
-		return -ENODEV;
+		return -EPROBE_DEFER;
 	}
 
 	return 0;
