@@ -197,7 +197,7 @@ static void probe_android_rvh_rtmutex_prepare_setprio(void *ignore, struct task_
 				update_rq_clock(rq);
 
 				queued = task_on_rq_queued(p);
-				running = task_current(rq, p);
+				running = task_current_donor(rq, p);
 				if (queued)
 					deactivate_task(rq, p,
 						DEQUEUE_SAVE | DEQUEUE_NOCLOCK);
