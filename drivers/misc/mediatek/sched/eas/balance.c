@@ -27,6 +27,9 @@ int mtk_can_migrate_task(struct task_struct *p, int dst_cpu)
 	if (p->se.sched_delayed)
 		return false;
 
+	if (task_is_blocked(p))
+		return false;
+
 	if (cpu_paused(dst_cpu))
 		return false;
 
@@ -45,7 +48,8 @@ int mtk_can_migrate_task(struct task_struct *p, int dst_cpu)
 		}
 	}
 
-	if (task_on_cpu(src_rq, p))
+	if (task_on_cpu(src_rq, p) || task_current(src_rq, p) ||
+	    task_current_donor(src_rq, p))
 		return false;
 
 	if (READ_ONCE(src_rq->rd->overutilized))
@@ -229,10 +233,14 @@ static int mtk_active_load_balance_cpu_stop(void *data)
 	if (task_cpu(target_task) != busiest_cpu ||
 		(!cpumask_test_cpu(target_cpu, target_task->cpus_ptr)) ||
 		task_on_cpu(busiest_rq, target_task) ||
+		task_current(busiest_rq, target_task) ||
+		task_current_donor(busiest_rq, target_task) ||
 		target_rq == busiest_rq)
 		goto out_unlock;
 
-	if (!task_on_rq_queued(target_task))
+	if (!task_on_rq_queued(target_task) ||
+		target_task->se.sched_delayed ||
+		task_is_blocked(target_task))
 		goto out_unlock;
 
 	if (!cpu_active(busiest_cpu) || !cpu_active(target_cpu))

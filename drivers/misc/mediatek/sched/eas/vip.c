@@ -266,9 +266,13 @@ struct task_struct *next_vip_runnable_in_cpu(struct rq *rq, int type)
 			continue;
 
 		p = vts_to_ts(tmp_vts);
-		/* we should pull runnable here, so don't pull curr*/
-		if (!rq->curr || p->pid != rq->curr->pid)
-			return p;
+		/* we should pull runnable here, so don't pull curr/donor/blocked/delayed */
+		if (task_current(rq, p) || task_current_donor(rq, p) ||
+		    task_on_cpu(rq, p) || task_is_blocked(p) ||
+		    p->se.sched_delayed)
+			continue;
+
+		return p;
 	}
 
 	return NULL;
@@ -1300,7 +1304,11 @@ void vip_push_runnable(struct rq *src_rq)
 		goto unlock;
 
 	if ((task_rq(task_to_pushed) != src_rq) ||
-		(cpu_rq(task_cpu(task_to_pushed))->curr->pid == task_to_pushed->pid) ||
+		task_current(src_rq, task_to_pushed) ||
+		task_current_donor(src_rq, task_to_pushed) ||
+		task_on_cpu(src_rq, task_to_pushed) ||
+		task_is_blocked(task_to_pushed) ||
+		task_to_pushed->se.sched_delayed ||
 		(!task_on_rq_queued(task_to_pushed)))
 		goto unlock;
 
