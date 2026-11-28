@@ -515,6 +515,8 @@ static int pca_tfcp_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
+	tadapter_dev_set_drvdata(info->tadapter_dev, info);
+
 	return 0;
 }
 
