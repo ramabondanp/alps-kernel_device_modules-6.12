@@ -53,7 +53,7 @@
 #include "tc_ta_class.h"
 
 #define TFCP_TA_MAX_REG_LEN	4
-#define TFCP_TA_RETRY_CNT	3
+#define TFCP_TA_RETRY_CNT	5
 #define TFCP_TA_CRC8_POLY	0x07
 
 /* Register map recovered from the firmware disassembly */
@@ -85,80 +85,89 @@ struct tfcp_ta_info {
 	bool suspended;
 };
 
-/* Matches the firmware's transfer helper: CRC8 over the payload, then
- * i2c_transfer_buffer_flags with the adapter selected by
- * charger_dev_i2c_trans().
+/* Single transfer; retries live in the read/write helpers so each attempt
+ * covers the whole register exchange, as the firmware does.
  */
 static int tfcp_ta_transfer(struct tfcp_ta_info *info, u8 *buf, int len,
 			    bool read)
 {
-	struct i2c_msg msg;
-	int ret, i;
-
-	if (info->suspended)
-		return 0;
-
-	msg.addr = info->client->addr;
-	msg.flags = read ? I2C_M_RD : 0;
-	msg.len = len;
-	msg.buf = buf;
-
-	for (i = 0; i < TFCP_TA_RETRY_CNT; i++) {
-		ret = i2c_transfer_buffer_flags(info->client, buf, len,
-					       read ? I2C_M_RD : 0);
-		if (ret == len)
-			return 0;
-		usleep_range_state(1000, 2000, TASK_UNINTERRUPTIBLE);
-	}
-
-	return -EIO;
+	return i2c_transfer_buffer_flags(info->client, buf, len,
+					 read ? I2C_M_RD : 0);
 }
 
 static int tfcp_ta_read_device(struct tfcp_ta_info *info, u8 reg, void *buf,
 			       int len)
 {
-	u8 tmp[TFCP_TA_MAX_REG_LEN];
-	int ret;
+	u8 tmp[TFCP_TA_MAX_REG_LEN + 1] = { 0 };
+	u8 crc;
+	int ret, i;
 
 	if (len > TFCP_TA_MAX_REG_LEN)
 		return -EINVAL;
 
-	ret = tfcp_ta_transfer(info, tmp, len, true);
-	if (ret < 0) {
-		dev_err(info->dev, "%s: reg 0x%02x failed\n", __func__, reg);
-		return ret;
+	if (info->suspended)
+		return 0;
+
+	for (i = 0; i < TFCP_TA_RETRY_CNT; i++) {
+		tmp[0] = reg;
+		tmp[1] = crc8(info->crc8_table, &reg, 1, CRC8_INIT_VALUE);
+
+		ret = tfcp_ta_transfer(info, tmp, 2, false);
+		if (ret < 0)
+			continue;
+
+		usleep_range_state(800, 800, TASK_UNINTERRUPTIBLE);
+
+		ret = tfcp_ta_transfer(info, tmp, len + 1, true);
+		if (ret < 0)
+			continue;
+
+		/* The TA appends CRC8 over the payload */
+		crc = crc8(info->crc8_table, tmp, len, CRC8_INIT_VALUE);
+		if (tmp[len] != crc) {
+			dev_dbg(info->dev, "%s: crc mismatch on 0x%02x\n",
+				__func__, reg);
+			continue;
+		}
+
+		memcpy(buf, tmp, len);
+
+		return 0;
 	}
 
-	/* Verify the register CRC the TA appended */
-	if (crc8(info->crc8_table, tmp, len, CRC8_INIT_VALUE) !=
-	    crc8(info->crc8_table, &reg, 1, CRC8_INIT_VALUE))
-		dev_dbg(info->dev, "%s: crc mismatch on 0x%02x\n", __func__, reg);
+	dev_err(info->dev, "%s: reg 0x%02x failed\n", __func__, reg);
 
-	memcpy(buf, tmp, len);
-
-	return 0;
+	return ret < 0 ? ret : -EIO;
 }
 
 static int tfcp_ta_write_device(struct tfcp_ta_info *info, u8 reg,
 				const void *buf, int len)
 {
-	u8 tmp[TFCP_TA_MAX_REG_LEN + 2];
-	int ret;
+	u8 tmp[TFCP_TA_MAX_REG_LEN + 3] = { 0 };
+	int ret, i;
 
 	if (len > TFCP_TA_MAX_REG_LEN)
 		return -EINVAL;
 
-	tmp[0] = reg;
-	memcpy(&tmp[1], buf, len);
-	tmp[len + 1] = crc8(info->crc8_table, tmp, len + 1, CRC8_INIT_VALUE);
+	if (info->suspended)
+		return 0;
 
-	ret = tfcp_ta_transfer(info, tmp, len + 2, false);
-	if (ret < 0) {
-		dev_err(info->dev, "%s: reg 0x%02x failed\n", __func__, reg);
-		return ret;
+	tmp[0] = reg;
+	tmp[1] = len;
+	memcpy(&tmp[2], buf, len);
+	tmp[len + 2] = crc8(info->crc8_table, tmp, len + 2, CRC8_INIT_VALUE);
+
+	for (i = 0; i < TFCP_TA_RETRY_CNT; i++) {
+		ret = tfcp_ta_transfer(info, tmp, len + 3, false);
+		if (ret >= 0)
+			return 0;
+
+		usleep_range_state(1000, 2000, TASK_UNINTERRUPTIBLE);
 	}
 
-	return 0;
+	dev_err(info->dev, "%s: reg 0x%02x failed\n", __func__, reg);
+
+	return ret;
 }
 
 static int tfcp_ta_i2c_read32(struct tfcp_ta_info *info, u8 reg, u32 *val)
@@ -176,20 +185,43 @@ static int tfcp_ta_i2c_write32(struct tfcp_ta_info *info, u8 reg, u32 val)
 	return tfcp_ta_write_device(info, reg, &val, TFCP_TA_MAX_REG_LEN);
 }
 
-/* Read-modify-write, matching the firmware's tfcp_ta_i2c_update32 */
-static int tfcp_ta_i2c_update32(struct tfcp_ta_info *info, u8 reg, u32 mask,
-				 u32 val)
+/*
+ * Read-modify-write of the VC register (0xb2). The firmware hardcodes the
+ * register, verifies the write by reading it back, and retries the whole
+ * sequence while holding io_lock.
+ */
+static int tfcp_ta_i2c_update32(struct tfcp_ta_info *info, u32 val, u32 mask)
 {
-	u32 tmp;
-	int ret;
+	u32 tmp = 0, check = 0;
+	int ret, i;
 
-	ret = tfcp_ta_i2c_read32(info, reg, &tmp);
-	if (ret < 0)
-		return ret;
+	mutex_lock(&info->io_lock);
+	for (i = 0; i < TFCP_TA_RETRY_CNT; i++) {
+		ret = tfcp_ta_i2c_read32(info, TFCP_REG_VC, &tmp);
+		if (ret < 0)
+			goto retry;
 
-	tmp = (tmp & ~mask) | (val & mask);
+		tmp = (tmp & ~mask) | (val & mask);
 
-	return tfcp_ta_i2c_write32(info, reg, tmp);
+		ret = tfcp_ta_i2c_write32(info, TFCP_REG_VC, tmp);
+		if (ret < 0)
+			goto retry;
+
+		ret = tfcp_ta_i2c_read32(info, TFCP_REG_VC, &check);
+		if (ret < 0)
+			goto retry;
+
+		if (check == tmp) {
+			ret = 0;
+			break;
+		}
+		ret = -EINVAL;
+retry:
+		usleep_range_state(1000, 2000, TASK_UNINTERRUPTIBLE);
+	}
+	mutex_unlock(&info->io_lock);
+
+	return ret;
 }
 
 static struct tfcp_ta_info *tfcp_ta_get_info(struct tc_ta_classdev *ttc)
@@ -257,36 +289,84 @@ static int tfcp_tc_ta_get_datecode(struct tc_ta_classdev *ttc, u8 *code,
 	return 0;
 }
 
+static int tfcp_ta_read_locked(struct tfcp_ta_info *info, u8 reg, u32 *val)
+{
+	int ret;
+
+	mutex_lock(&info->io_lock);
+	ret = tfcp_ta_i2c_read32(info, reg, val);
+	mutex_unlock(&info->io_lock);
+
+	return ret;
+}
+
 static int tfcp_tc_ta_get_min_voltage(struct tc_ta_classdev *ttc, u32 *volt)
 {
-	return tfcp_ta_i2c_read32(tfcp_ta_get_info(ttc), TFCP_REG_MIN_VC, volt);
+	u32 val = 0;
+	int ret;
+
+	ret = tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_MIN_VC, &val);
+	if (ret < 0)
+		return ret;
+
+	*volt = val & 0xffff;
+
+	return 0;
 }
 
 static int tfcp_tc_ta_get_max_voltage(struct tc_ta_classdev *ttc, u32 *volt)
 {
-	return tfcp_ta_i2c_read32(tfcp_ta_get_info(ttc), TFCP_REG_MAX_VC, volt);
+	u32 val = 0;
+	int ret;
+
+	ret = tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_MAX_VC, &val);
+	if (ret < 0)
+		return ret;
+
+	*volt = val & 0xffff;
+
+	return 0;
 }
 
 static int tfcp_tc_ta_get_min_current(struct tc_ta_classdev *ttc, u32 *curr)
 {
-	return tfcp_ta_i2c_read32(tfcp_ta_get_info(ttc), TFCP_REG_MIN_VC, curr);
+	u32 val = 0;
+	int ret;
+
+	ret = tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_MIN_VC, &val);
+	if (ret < 0)
+		return ret;
+
+	*curr = val >> 16;
+
+	return 0;
 }
 
 static int tfcp_tc_ta_get_max_current(struct tc_ta_classdev *ttc, u32 *curr)
 {
-	return tfcp_ta_i2c_read32(tfcp_ta_get_info(ttc), TFCP_REG_MAX_VC, curr);
+	u32 val = 0;
+	int ret;
+
+	ret = tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_MAX_VC, &val);
+	if (ret < 0)
+		return ret;
+
+	*curr = val >> 16;
+
+	return 0;
 }
 
 static int tfcp_tc_ta_get_output_voltage(struct tc_ta_classdev *ttc,
 					 u32 *volt)
 {
-	struct tfcp_ta_info *ti = tfcp_ta_get_info(ttc);
 	u32 val = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_OUTPUT_VC, &val);
+	ret = tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_OUTPUT_VC,
+				  &val);
 	if (ret < 0)
 		return ret;
+
 	*volt = val & 0xffff;
 
 	return 0;
@@ -295,13 +375,14 @@ static int tfcp_tc_ta_get_output_voltage(struct tc_ta_classdev *ttc,
 static int tfcp_tc_ta_get_output_current(struct tc_ta_classdev *ttc,
 					 u32 *curr)
 {
-	struct tfcp_ta_info *ti = tfcp_ta_get_info(ttc);
 	u32 val = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_OUTPUT_VC, &val);
+	ret = tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_OUTPUT_VC,
+				  &val);
 	if (ret < 0)
 		return ret;
+
 	*curr = val >> 16;
 
 	return 0;
@@ -310,13 +391,14 @@ static int tfcp_tc_ta_get_output_current(struct tc_ta_classdev *ttc,
 static int tfcp_tc_ta_get_output_voltage_current(struct tc_ta_classdev *ttc,
 						u32 *volt, u32 *curr)
 {
-	struct tfcp_ta_info *ti = tfcp_ta_get_info(ttc);
 	u32 val = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_OUTPUT_VC, &val);
+	ret = tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_OUTPUT_VC,
+				  &val);
 	if (ret < 0)
 		return ret;
+
 	*volt = val & 0xffff;
 	*curr = val >> 16;
 
@@ -372,10 +454,28 @@ static int tfcp_tc_ta_set_output_control(struct tc_ta_classdev *ttc,
 static int tfcp_tc_ta_set_mode(struct tc_ta_classdev *ttc, u32 mode)
 {
 	struct tfcp_ta_info *ti = tfcp_ta_get_info(ttc);
-	int ret;
+	u8 val = (u8)mode;
+	u8 check = 0;
+	int ret, i;
 
 	mutex_lock(&ti->io_lock);
-	ret = tfcp_ta_i2c_update32(ti, TFCP_REG_MODE, 0xff, mode);
+	for (i = 0; i < TFCP_TA_RETRY_CNT; i++) {
+		ret = tfcp_ta_i2c_write8(ti, TFCP_REG_MODE, val);
+		if (ret < 0)
+			goto retry;
+
+		ret = tfcp_ta_read_device(ti, TFCP_REG_MODE, &check, 1);
+		if (ret < 0)
+			goto retry;
+
+		if (check == val) {
+			ret = 0;
+			break;
+		}
+		ret = -EINVAL;
+retry:
+		usleep_range_state(1000, 2000, TASK_UNINTERRUPTIBLE);
+	}
 	mutex_unlock(&ti->io_lock);
 
 	return ret;
@@ -383,22 +483,13 @@ static int tfcp_tc_ta_set_mode(struct tc_ta_classdev *ttc, u32 mode)
 
 static int tfcp_tc_ta_set_voltage(struct tc_ta_classdev *ttc, u32 volt)
 {
-	struct tfcp_ta_info *ti = tfcp_ta_get_info(ttc);
-	int ret;
-
-	mutex_lock(&ti->io_lock);
-	ret = tfcp_ta_i2c_update32(ti, TFCP_REG_MODE, 0xffff, volt);
-	mutex_unlock(&ti->io_lock);
-
-	return ret;
+	return tfcp_ta_i2c_update32(tfcp_ta_get_info(ttc), volt, 0xffff);
 }
-
-static int tfcp_tc_ta_set_voltage_current(struct tc_ta_classdev *ttc, u32 volt,
-					  u32 curr);
 
 static int tfcp_tc_ta_set_current(struct tc_ta_classdev *ttc, u32 curr)
 {
-	return tfcp_tc_ta_set_voltage_current(ttc, 0, curr);
+	return tfcp_ta_i2c_update32(tfcp_ta_get_info(ttc), curr << 16,
+				    0xffff0000);
 }
 
 static int tfcp_tc_ta_set_voltage_current(struct tc_ta_classdev *ttc, u32 volt,
@@ -578,6 +669,7 @@ static int tfcp_ta_i2c_probe(struct i2c_client *client)
 
 	info->dev = &client->dev;
 	info->client = client;
+	i2c_set_clientdata(client, info);
 
 	mutex_init(&info->io_lock);
 	mutex_init(&info->suspend_lock);
@@ -596,8 +688,6 @@ static int tfcp_ta_i2c_probe(struct i2c_client *client)
 		dev_err(&client->dev, "failed to register tfcp_ta\n");
 		return ret;
 	}
-
-	i2c_set_clientdata(client, info);
 
 	return 0;
 }
