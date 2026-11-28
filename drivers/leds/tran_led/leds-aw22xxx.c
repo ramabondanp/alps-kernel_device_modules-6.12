@@ -2254,20 +2254,16 @@ static void aw22xxx_i2c_remove(struct i2c_client *i2c)
 
     pr_info("%s: enter\n", __func__);
 
-    hrtimer_cancel(&aw22xxx->fw_timer);
-    cancel_work_sync(&aw22xxx->fw_work);
-    cancel_work_sync(&aw22xxx->cfg_work);
-    cancel_work_sync(&aw22xxx->brightness_work);
-    cancel_work_sync(&aw22xxx->task_work);
-
     device_remove_file(&i2c->dev, &dev_attr_tran_led_cmd);
     device_remove_file(&i2c->dev, &dev_attr_tran_multicolor);
     sysfs_remove_group(&aw22xxx->cdev.dev->kobj,
             &aw22xxx_attribute_group);
     led_classdev_unregister(&aw22xxx->cdev);
 
-    if (aw22xxx->led_dev)
+    if (aw22xxx->led_dev) {
         tran_led_device_unregister(aw22xxx->led_dev);
+        aw22xxx->led_dev = NULL;
+    }
     if (aw22xxx->led_kobj) {
         kobject_put(aw22xxx->led_kobj);
         aw22xxx->led_kobj = NULL;
@@ -2277,6 +2273,12 @@ static void aw22xxx_i2c_remove(struct i2c_client *i2c)
         !(aw22xxx->flags & AW22XXX_FLAG_SKIP_INTERRUPTS))
         devm_free_irq(&i2c->dev,
                 aw22xxx_gpio_to_irq(aw22xxx->irq_gpio), aw22xxx);
+
+    hrtimer_cancel(&aw22xxx->fw_timer);
+    cancel_work_sync(&aw22xxx->fw_work);
+    cancel_work_sync(&aw22xxx->cfg_work);
+    cancel_work_sync(&aw22xxx->brightness_work);
+    cancel_work_sync(&aw22xxx->task_work);
 
     devm_kfree(&i2c->dev, aw22xxx);
 }
