@@ -226,7 +226,7 @@ retry:
 
 static struct tfcp_ta_info *tfcp_ta_get_info(struct tc_ta_classdev *ttc)
 {
-	return dev_get_drvdata(ttc->dev);
+	return container_of(ttc, struct tfcp_ta_info, ta_dev);
 }
 
 static int tfcp_ta_read_locked(struct tfcp_ta_info *info, u8 reg, u32 *val)
