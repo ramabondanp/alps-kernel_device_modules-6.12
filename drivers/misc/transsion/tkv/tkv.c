@@ -13,11 +13,14 @@
 
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/kstrtox.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/overflow.h>
 #include <linux/pfn.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -87,11 +90,34 @@ int get_tkv_base(void)
  * The firmware trusts the bootloader address and ioremaps it blindly.  A
  * wrong or malicious tkv= value would then read 32 KiB from an arbitrary
  * physical address, which can hit device registers with read side effects.
- * Only map the region when every page is System RAM.  This is deliberately
- * stricter than the stock module; if the check fails we skip /proc/tkv
- * instead of risking a bus hang.
+ * Only map the region when every page is System RAM or falls within the
+ * stock /reserved-memory/mblock-24-tkv-reserved DT node (which uses no-map
+ * and is therefore excluded from System RAM).  If both checks fail we skip
+ * /proc/tkv instead of risking a bus hang.
  */
-static bool tkv_region_is_ram(unsigned long base, size_t size)
+static bool tkv_region_in_reserved_dt(unsigned long base, size_t size)
+{
+	struct device_node *np;
+	struct resource res;
+	unsigned long end;
+
+	if (!size || check_add_overflow(base, size - 1, &end))
+		return false;
+
+	np = of_find_node_by_path("/reserved-memory/mblock-24-tkv-reserved");
+	if (!np)
+		return false;
+
+	if (of_address_to_resource(np, 0, &res)) {
+		of_node_put(np);
+		return false;
+	}
+	of_node_put(np);
+
+	return base >= res.start && end <= res.end;
+}
+
+static bool tkv_region_is_valid(unsigned long base, size_t size)
 {
 	unsigned long pfn = PHYS_PFN(base);
 	unsigned long pages = DIV_ROUND_UP(size, PAGE_SIZE);
@@ -99,6 +125,9 @@ static bool tkv_region_is_ram(unsigned long base, size_t size)
 
 	if (!base || !IS_ALIGNED(base, PAGE_SIZE))
 		return false;
+
+	if (tkv_region_in_reserved_dt(base, size))
+		return true;
 
 	for (i = 0; i < pages; i++)
 		if (!page_is_ram(pfn + i))
@@ -212,8 +241,8 @@ static int __init tkv_init(void)
 		return 0;
 	}
 
-	if (!tkv_region_is_ram(g_tkv_base, TKV_REGION_SIZE)) {
-		pr_err("tkv: 0x%lx..0x%lx is not System RAM, refusing to map\n",
+	if (!tkv_region_is_valid(g_tkv_base, TKV_REGION_SIZE)) {
+		pr_err("tkv: 0x%lx..0x%lx is outside System RAM and reserved DT, refusing to map\n",
 		       g_tkv_base, g_tkv_base + TKV_REGION_SIZE - 1);
 		return 0;
 	}
