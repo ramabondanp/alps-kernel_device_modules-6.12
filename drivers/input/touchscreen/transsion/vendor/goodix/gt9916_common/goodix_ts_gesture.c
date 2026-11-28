@@ -27,6 +27,7 @@ extern void tran_gesture_set_code(u8 code);
 struct gesture_module {
 	atomic_t registered;
 	bool irq_wake_enabled;
+	bool gesture_suspended;
 	u8 gesture_type;
 	struct goodix_ts_core *ts_core;
 	struct goodix_ext_module module;
@@ -269,6 +270,8 @@ static int gsx_gesture_before_suspend(struct goodix_ts_core *cd,
 	else
 		ts_err("failed to enable irq wake");
 
+	gsx->gesture_suspended = true;
+
 	return EVT_CANCEL_SUSPEND;
 }
 
@@ -283,9 +286,10 @@ static int gsx_gesture_before_resume(struct goodix_ts_core *cd,
 		gsx->irq_wake_enabled = false;
 	}
 
-	if (gsx->gesture_type == 0)
+	if (!gsx->gesture_suspended)
 		return EVT_CONTINUE;
 
+	gsx->gesture_suspended = false;
 	hw_ops->reset(cd, GOODIX_NORMAL_RESET_DELAY_MS);
 
 	return EVT_CANCEL_RESUME;
