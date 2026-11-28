@@ -211,27 +211,36 @@ static int __maybe_unused pca_tfcp_enable_charging(struct tadapter_device *dev,
 						PCA_TFCP_ENABLE_MA);
 }
 
+static int pca_tfcp_usb_ctrl_ta_off(void)
+{
+	struct tran_device *tdev;
+	union com_propval val = { 0 };
+	int ret;
+
+	tdev = tran_get_by_name("usb_control");
+	ret = tran_dev_set_prop(tdev, TRAN_PROP_USB_CTRL_TA_OFF, &val);
+	if (tdev)
+		put_device(&tdev->dev);
+
+	return ret;
+}
+
 static int __maybe_unused pca_tfcp_inform_related_module(struct tadapter_device *dev)
 {
 	struct pca_tfcp_info *info = tadapter_dev_get_drvdata(dev);
-	union com_propval val = { 0 };
 
 	if (!info->det_done)
 		return 0;
 
 	info->det_done = false;
 
-	return tran_dev_set_prop(tran_get_by_name("usb_control"),
-				 TRAN_PROP_USB_CTRL_TA_OFF, &val);
+	return pca_tfcp_usb_ctrl_ta_off();
 }
 
 static int __maybe_unused pca_tfcp_exit_rfc_mode(struct tadapter_device *dev)
 {
-	union com_propval val = { 0 };
-
 	/* The firmware releases RFC by asking usb_control to turn the TA off */
-	return tran_dev_set_prop(tran_get_by_name("usb_control"),
-				 TRAN_PROP_USB_CTRL_TA_OFF, &val);
+	return pca_tfcp_usb_ctrl_ta_off();
 }
 
 static int pca_tfcp_is_cc(struct tadapter_device *dev, bool *cc)
@@ -314,13 +323,11 @@ static int pca_tfcp_get_ta_fw(struct tadapter_device *dev, u8 *code,
 static int pca_tfcp_plug_out_reset(struct tadapter_device *dev)
 {
 	struct pca_tfcp_info *info = tadapter_dev_get_drvdata(dev);
-	union com_propval val = { 0 };
 
 	info->det_done = false;
 
 	/* The firmware turns the TA off through usb_control and returns 0 */
-	tran_dev_set_prop(tran_get_by_name("usb_control"),
-			  TRAN_PROP_USB_CTRL_TA_OFF, &val);
+	pca_tfcp_usb_ctrl_ta_off();
 
 	return 0;
 }
