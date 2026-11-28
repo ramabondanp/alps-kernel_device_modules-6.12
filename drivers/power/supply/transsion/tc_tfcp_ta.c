@@ -102,7 +102,7 @@ static int tfcp_ta_read_device(struct tfcp_ta_info *info, u8 reg, void *buf,
 	u8 crc;
 	int ret, i;
 
-	if (len > TFCP_TA_MAX_REG_LEN)
+	if (len <= 0 || len > TFCP_TA_MAX_REG_LEN)
 		return -EINVAL;
 
 	if (info->suspended)
@@ -113,13 +113,13 @@ static int tfcp_ta_read_device(struct tfcp_ta_info *info, u8 reg, void *buf,
 		tmp[1] = crc8(info->crc8_table, &reg, 1, CRC8_INIT_VALUE);
 
 		ret = tfcp_ta_transfer(info, tmp, 2, false);
-		if (ret < 0)
+		if (ret != 2)
 			continue;
 
 		usleep_range_state(800, 800, TASK_UNINTERRUPTIBLE);
 
 		ret = tfcp_ta_transfer(info, tmp, len + 1, true);
-		if (ret < 0)
+		if (ret != len + 1)
 			continue;
 
 		/* The TA appends CRC8 over the payload */
@@ -146,7 +146,7 @@ static int tfcp_ta_write_device(struct tfcp_ta_info *info, u8 reg,
 	u8 tmp[TFCP_TA_MAX_REG_LEN + 3] = { 0 };
 	int ret, i;
 
-	if (len > TFCP_TA_MAX_REG_LEN)
+	if (len <= 0 || len > TFCP_TA_MAX_REG_LEN)
 		return -EINVAL;
 
 	if (info->suspended)
@@ -159,7 +159,7 @@ static int tfcp_ta_write_device(struct tfcp_ta_info *info, u8 reg,
 
 	for (i = 0; i < TFCP_TA_RETRY_CNT; i++) {
 		ret = tfcp_ta_transfer(info, tmp, len + 3, false);
-		if (ret >= 0)
+		if (ret == len + 3)
 			return 0;
 
 		usleep_range_state(1000, 2000, TASK_UNINTERRUPTIBLE);
@@ -167,7 +167,7 @@ static int tfcp_ta_write_device(struct tfcp_ta_info *info, u8 reg,
 
 	dev_err(info->dev, "%s: reg 0x%02x failed\n", __func__, reg);
 
-	return ret;
+	return ret < 0 ? ret : -EIO;
 }
 
 static int tfcp_ta_i2c_read32(struct tfcp_ta_info *info, u8 reg, u32 *val)
@@ -229,6 +229,17 @@ static struct tfcp_ta_info *tfcp_ta_get_info(struct tc_ta_classdev *ttc)
 	return dev_get_drvdata(ttc->dev);
 }
 
+static int tfcp_ta_read_locked(struct tfcp_ta_info *info, u8 reg, u32 *val)
+{
+	int ret;
+
+	mutex_lock(&info->io_lock);
+	ret = tfcp_ta_i2c_read32(info, reg, val);
+	mutex_unlock(&info->io_lock);
+
+	return ret;
+}
+
 static int tfcp_tc_ta_get_verinfo(struct tc_ta_classdev *ttc, u8 *info,
 				  u32 length)
 {
@@ -236,7 +247,7 @@ static int tfcp_tc_ta_get_verinfo(struct tc_ta_classdev *ttc, u8 *info,
 	u32 val = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_VERINFO, &val);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_VERINFO, &val);
 	if (ret < 0)
 		return ret;
 	memcpy(info, &val, min_t(u32, length, TFCP_TA_MAX_REG_LEN));
@@ -251,7 +262,7 @@ static int tfcp_tc_ta_get_fwcode(struct tc_ta_classdev *ttc, u8 *code,
 	u32 val = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_FWCODE, &val);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_FWCODE, &val);
 	if (ret < 0)
 		return ret;
 	memcpy(code, &val, min_t(u32, length, TFCP_TA_MAX_REG_LEN));
@@ -266,7 +277,7 @@ static int tfcp_tc_ta_get_mfinfo(struct tc_ta_classdev *ttc, u8 *code,
 	u32 val = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_MFINFO, &val);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_MFINFO, &val);
 	if (ret < 0)
 		return ret;
 	memcpy(code, &val, min_t(u32, length, TFCP_TA_MAX_REG_LEN));
@@ -281,23 +292,12 @@ static int tfcp_tc_ta_get_datecode(struct tc_ta_classdev *ttc, u8 *code,
 	u32 val = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_DATECODE, &val);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_DATECODE, &val);
 	if (ret < 0)
 		return ret;
 	memcpy(code, &val, min_t(u32, length, TFCP_TA_MAX_REG_LEN));
 
 	return 0;
-}
-
-static int tfcp_ta_read_locked(struct tfcp_ta_info *info, u8 reg, u32 *val)
-{
-	int ret;
-
-	mutex_lock(&info->io_lock);
-	ret = tfcp_ta_i2c_read32(info, reg, val);
-	mutex_unlock(&info->io_lock);
-
-	return ret;
 }
 
 static int tfcp_tc_ta_get_min_voltage(struct tc_ta_classdev *ttc, u32 *volt)
@@ -407,7 +407,8 @@ static int tfcp_tc_ta_get_output_voltage_current(struct tc_ta_classdev *ttc,
 
 static int tfcp_tc_ta_get_status(struct tc_ta_classdev *ttc, u32 *status)
 {
-	return tfcp_ta_i2c_read32(tfcp_ta_get_info(ttc), TFCP_REG_STATUS, status);
+	return tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_STATUS,
+				   status);
 }
 
 static int tfcp_tc_ta_get_temp1(struct tc_ta_classdev *ttc, u32 *degree)
@@ -416,7 +417,7 @@ static int tfcp_tc_ta_get_temp1(struct tc_ta_classdev *ttc, u32 *degree)
 	u32 status = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_STATUS, &status);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_STATUS, &status);
 	if (ret < 0)
 		return ret;
 	*degree = status & 0xff;
@@ -430,7 +431,7 @@ static int tfcp_tc_ta_get_temp2(struct tc_ta_classdev *ttc, u32 *degree)
 	u32 status = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_STATUS, &status);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_STATUS, &status);
 	if (ret < 0)
 		return ret;
 	*degree = (status >> 8) & 0xff;
@@ -513,7 +514,7 @@ static int tfcp_tc_ta_authentication(struct tc_ta_classdev *ttc)
 	int ret;
 
 	/* Handshake completes when the TA reports a valid status word */
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_STATUS, &status);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_STATUS, &status);
 	if (ret < 0)
 		return ret;
 
@@ -551,15 +552,15 @@ static int tfcp_tc_ta_set_wdt(struct tc_ta_classdev *ttc, u32 ms)
 
 static int tfcp_tc_ta_get_power_limit(struct tc_ta_classdev *ttc, u32 *power)
 {
-	return tfcp_ta_i2c_read32(tfcp_ta_get_info(ttc), TFCP_REG_POWER_LIMIT,
-				  power);
+	return tfcp_ta_read_locked(tfcp_ta_get_info(ttc), TFCP_REG_POWER_LIMIT,
+				   power);
 }
 
 static int tfcp_tc_ta_get_max_power_duration(struct tc_ta_classdev *ttc,
 					     u32 *time)
 {
-	return tfcp_ta_i2c_read32(tfcp_ta_get_info(ttc), TFCP_REG_POWER_DURATION,
-				  time);
+	return tfcp_ta_read_locked(tfcp_ta_get_info(ttc),
+				   TFCP_REG_POWER_DURATION, time);
 }
 
 static int tfcp_tc_ta_get_output_control_support(struct tc_ta_classdev *ttc,
@@ -569,7 +570,7 @@ static int tfcp_tc_ta_get_output_control_support(struct tc_ta_classdev *ttc,
 	u32 status = 0;
 	int ret;
 
-	ret = tfcp_ta_i2c_read32(ti, TFCP_REG_STATUS, &status);
+	ret = tfcp_ta_read_locked(ti, TFCP_REG_STATUS, &status);
 	if (ret < 0)
 		return ret;
 	/* Bit 0 of the status word advertises output-control support */
