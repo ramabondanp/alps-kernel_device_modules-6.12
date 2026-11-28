@@ -56,6 +56,8 @@ struct tran_usb_extcon_info {
 	struct delayed_work wq_psy;
 	struct notifier_block tcpc_nb;
 	bool bypss_typec_sink;
+	bool otg_nb_registered;
+	bool usb_psy_non_devm;
 	unsigned int otg_event;
 	struct notifier_block otg_nb;
 	struct delayed_work otg_work;
@@ -393,16 +395,19 @@ static int tran_usb_extcon_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&extcon->otg_work, do_otg_work);
 
 	extcon->otg_nb.notifier_call = extcon_otg_notifier;
-	ret = devm_extcon_register_notifier(dev, extcon->edev,
-					    EXTCON_USB_HOST,
-					    &extcon->otg_nb);
+	ret = extcon_register_notifier(extcon->edev, EXTCON_USB_HOST,
+				       &extcon->otg_nb);
 	if (ret < 0)
 		dev_err(dev, "fail to register notifer\n");
+	else
+		extcon->otg_nb_registered = true;
 
 	extcon->role_sw = usb_role_switch_get(dev);
 	if (IS_ERR(extcon->role_sw)) {
 		dev_err(dev, "failed to get usb role\n");
-		return PTR_ERR(extcon->role_sw);
+		ret = PTR_ERR(extcon->role_sw);
+		extcon->role_sw = NULL;
+		goto err_otg;
 	}
 
 	if (extcon->role_sw)
@@ -418,13 +423,17 @@ static int tran_usb_extcon_probe(struct platform_device *pdev)
 
 	extcon->extcon_wq = alloc_workqueue("tran-extcon-usb",
 					    WQ_HIGHPRI | WQ_UNBOUND, 1);
-	if (!extcon->extcon_wq)
-		return -ENOMEM;
+	if (!extcon->extcon_wq) {
+		ret = -ENOMEM;
+		goto err_role_sw;
+	}
 
 	extcon->usb_psy = devm_power_supply_get_by_phandle(dev, "charger");
 	if (IS_ERR_OR_NULL(extcon->usb_psy)) {
 		extcon->usb_psy = power_supply_get_by_name("primary_chg");
-		if (!extcon->usb_psy)
+		if (extcon->usb_psy)
+			extcon->usb_psy_non_devm = true;
+		else
 			dev_info(dev, "fail to get usb_psy\n");
 	}
 
@@ -451,6 +460,24 @@ static int tran_usb_extcon_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, extcon);
 
 	return 0;
+
+err_role_sw:
+	if (extcon->smt_pde) {
+		proc_remove(extcon->smt_pde);
+		extcon->smt_pde = NULL;
+	}
+	if (extcon->role_sw) {
+		usb_role_switch_put(extcon->role_sw);
+		extcon->role_sw = NULL;
+	}
+err_otg:
+	if (extcon->otg_nb_registered) {
+		extcon_unregister_notifier(extcon->edev, EXTCON_USB_HOST,
+					   &extcon->otg_nb);
+		extcon->otg_nb_registered = false;
+	}
+	cancel_delayed_work_sync(&extcon->otg_work);
+	return ret;
 }
 
 static void tran_usb_extcon_remove(struct platform_device *pdev)
@@ -466,6 +493,16 @@ static void tran_usb_extcon_remove(struct platform_device *pdev)
 	if (extcon->usb_psy) {
 		power_supply_unreg_notifier(&extcon->psy_nb);
 		cancel_delayed_work_sync(&extcon->wq_psy);
+		if (extcon->usb_psy_non_devm) {
+			power_supply_put(extcon->usb_psy);
+			extcon->usb_psy = NULL;
+			extcon->usb_psy_non_devm = false;
+		}
+	}
+	if (extcon->otg_nb_registered) {
+		extcon_unregister_notifier(extcon->edev, EXTCON_USB_HOST,
+					   &extcon->otg_nb);
+		extcon->otg_nb_registered = false;
 	}
 	cancel_delayed_work_sync(&extcon->otg_work);
 
