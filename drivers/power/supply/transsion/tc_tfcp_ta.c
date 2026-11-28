@@ -631,32 +631,27 @@ static const struct tc_ta_device_ops tfcp_tc_ta_ops = {
 	.get_output_control_support = tfcp_tc_ta_get_output_control_support,
 };
 
-static int tfcp_ta_pinctrl_init(struct tfcp_ta_info *info)
+static void tfcp_ta_pinctrl_init(struct tfcp_ta_info *info)
 {
 	info->pinctrl = devm_pinctrl_get(info->dev);
 	if (IS_ERR_OR_NULL(info->pinctrl)) {
 		dev_err(info->dev, "Cannot find pinctrl\n");
-		return -EINVAL;
-	}
-
-	info->sclk_mode = pinctrl_lookup_state(info->pinctrl,
-					       "tfcp_i2c_sclk_mode");
-	if (IS_ERR_OR_NULL(info->sclk_mode)) {
-		dev_err(info->dev, "Cannot find pinctrl_i2c_clk_gpio\n");
-		return -EINVAL;
+		return;
 	}
 
 	info->data_gpio = pinctrl_lookup_state(info->pinctrl,
-					       "tfcp_i2c_data_gpio");
-	if (IS_ERR_OR_NULL(info->data_gpio)) {
+					       "tfcp_i2c_sda_mode");
+	if (IS_ERR_OR_NULL(info->data_gpio))
 		dev_err(info->dev, "Cannot find pinctrl_i2c_data_gpio\n");
-		return -EINVAL;
-	}
+	else
+		pinctrl_select_state(info->pinctrl, info->data_gpio);
 
-	pinctrl_select_state(info->pinctrl, info->sclk_mode);
-	pinctrl_select_state(info->pinctrl, info->data_gpio);
-
-	return 0;
+	info->sclk_mode = pinctrl_lookup_state(info->pinctrl,
+					       "tfcp_i2c_sclk_mode");
+	if (IS_ERR_OR_NULL(info->sclk_mode))
+		dev_err(info->dev, "Cannot find pinctrl_i2c_clk_gpio\n");
+	else
+		pinctrl_select_state(info->pinctrl, info->sclk_mode);
 }
 
 static int tfcp_ta_i2c_probe(struct i2c_client *client)
@@ -676,9 +671,7 @@ static int tfcp_ta_i2c_probe(struct i2c_client *client)
 	mutex_init(&info->suspend_lock);
 	crc8_populate_msb(info->crc8_table, TFCP_TA_CRC8_POLY);
 
-	ret = tfcp_ta_pinctrl_init(info);
-	if (ret < 0)
-		return ret;
+	tfcp_ta_pinctrl_init(info);
 
 	info->ta_dev.name = "tfcp_ta";
 	info->ta_dev.dev = &client->dev;
