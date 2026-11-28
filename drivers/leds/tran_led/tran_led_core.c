@@ -115,6 +115,8 @@ extern struct class *tlc_led_class;
 
 static struct tran_led_core *ptlc;
 static char *led_buff;
+static struct kobject *tlc_led_kobj;
+static struct kobject *tlc_pdlc_kobj;
 
 static int tran_led_dev_check(struct tran_led_core *tlc);
 
@@ -617,6 +619,9 @@ static int tran_led_core_probe(struct platform_device *pdev)
 		goto err_device;
 	}
 
+	tlc_led_kobj = led_kobj;
+	tlc_pdlc_kobj = pdlc_kobj;
+
 	tlc_info("%s: done\n", __func__);
 
 	return 0;
@@ -668,6 +673,19 @@ static void tran_led_core_teardown(struct platform_device *pdev)
 
 	kfree(led_buff);
 	led_buff = NULL;
+
+	if (tlc_pdlc_kobj) {
+		sysfs_remove_link(tlc_pdlc_kobj, "pdlc");
+		kobject_put(tlc_pdlc_kobj);
+		tlc_pdlc_kobj = NULL;
+	}
+	if (tlc_led_kobj) {
+		sysfs_remove_link(tlc_led_kobj, "led");
+		kobject_put(tlc_led_kobj);
+		tlc_led_kobj = NULL;
+	}
+	sysfs_remove_group(&pdev->dev.kobj, &tran_led_group);
+	platform_set_drvdata(pdev, NULL);
 	ptlc = NULL;
 }
 
